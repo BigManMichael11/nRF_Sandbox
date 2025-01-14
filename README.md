@@ -1,2 +1,2 @@
 # nRF_Sandbox
-Teasting ground for nrf features
+Teasting ground for nrf features.
