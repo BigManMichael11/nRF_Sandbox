@@ -4,7 +4,7 @@
  * push left for fast blinks
  * depress button to toggle (poor mechanical switch so this is unreliable)
  * Log will display messages to screen using 115200, COM5 for my PC
-
+ * uses sunfounder joystick
  */
 
 #include <zephyr/kernel.h>
