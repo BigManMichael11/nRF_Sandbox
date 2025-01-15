@@ -1,8 +1,10 @@
 /*
- * Copyright (c) 2016 Intel Corporation
- *
- * SPDX-License-Identifier: Apache-2.0
- * Tested on nRF Connect SDK Version : 2.0
+
+ * Push joystick up for slow blinks
+ * push left for fast blinks
+ * depress button to toggle (poor mechanical switch so this is unreliable)
+ * Log will display messages to screen using 115200, COM5 for my PC
+
  */
 
 #include <zephyr/kernel.h>
@@ -14,26 +16,55 @@
 #include <zephyr/drivers/adc.h>
 
 
-int val_mv;
-int val_mv2;
+LOG_MODULE_REGISTER(Joystick, LOG_LEVEL_DBG);//registers this program to be able to run up to debug messages
 
-static const struct adc_dt_spec adc_channel1 = ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user),0);
+
+//Global varables
+int x_mv;//x and y values in mv from the ADCs
+int y_mv;
+
+bool has_debounce;//bool for when debounce has finished
+
+bool led_timer_running;//bool for if timer for led is already going
+	
+int16_t x_adc_buf;//buffers for filling wiith adc values
+int16_t y_adc_buf;
+
+//structs for adc init and return bufs
+struct adc_sequence sequence = {
+	.buffer = &x_adc_buf,
+	.buffer_size = sizeof(x_adc_buf),
+	// Optional
+	//.calibrate = true,
+};
+
+struct adc_sequence sequence2 = {
+	.buffer = &y_adc_buf,
+	.buffer_size = sizeof(y_adc_buf),
+	// Optional
+	//.calibrate = true,
+};
+
+
+//
+
+
+static const struct adc_dt_spec adc_channel1 = ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user),0);//gets ADC channe from devicetree
 static const struct adc_dt_spec adc_channel2 = ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user),1);
 
-#define SLEEP_TIME_MS 10 * 60 * 1000
-
-#define SW0_NODE DT_ALIAS(sw4)
+#define SW0_NODE DT_ALIAS(sw4)//define a new button for the switch
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
 
-#define LED0_NODE DT_ALIAS(led0)
+#define LED0_NODE DT_ALIAS(led0)//define board LED1
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 
-static struct k_timer my_timer;
-static struct k_timer led_timer;
-bool has_debounce;
+static struct k_timer debounce_timer;//defines timers
+static struct k_timer led_blink_timer;
 
-LOG_MODULE_REGISTER(Joystick, LOG_LEVEL_DBG);
 
+static struct gpio_callback button_cb_data;
+
+//button press function, checks for debounce and toggles led
 void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	
@@ -45,95 +76,88 @@ void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t
 		LOG_INF("Button waiting on debounce");
 	}
 	has_debounce = false;
-	k_timer_start(&my_timer, K_MSEC(250), K_NO_WAIT);
+	k_timer_start(&debounce_timer, K_MSEC(500), K_NO_WAIT);
 	
 }
 
-static struct gpio_callback button_cb_data;
 
 
 
 
-void timer_expiry_function(struct k_timer *timer_id)
+//debounce expiry function, sets debounce to true and stops timer
+void debounce_timer_expiry_function(struct k_timer *timer_id)
 {
     has_debounce = true;
-	k_timer_stop(&my_timer);
+	k_timer_stop(&debounce_timer);
 }
 
-void timer_stop_function(struct k_timer *timer_id)
+
+//function for when debounce timer stops, no code needed yet
+void debounce_stop_timer_function(struct k_timer *timer_id)
 {
 
 }
 
-bool led_timer_running;
+
 
 void led_timer_expiry_function(struct k_timer *timer_id)
 {
 	//LOG_INF("Led toggling");
 	gpio_pin_toggle_dt(&led);
 	led_timer_running = true;
-    k_timer_start(&led_timer, K_MSEC(val_mv <= 1000 ? 200 : 500), K_NO_WAIT);
-	if(val_mv >= 1000 && val_mv2 >= 1000){
-		k_timer_stop(&led_timer);
+    k_timer_start(&led_blink_timer, K_MSEC(x_mv <= 1000 ? 200 : 500), K_NO_WAIT);
+	if(x_mv >= 1000 && y_mv >= 1000){
+		k_timer_stop(&led_blink_timer);
 		led_timer_running = false;
 	}
 	
 }
 
+//function for when led timer stops, no code needed yet
 void led_timer_stop_function(struct k_timer *timer_id)
 {
 
 }
 
 
-int main(void)
-{
-	
-	int ret;
-	LOG_INF("Start of main funciton\n");
-
-	has_debounce = true;
-
-	led_timer_running = false;
-	int err;
-
-	uint32_t count = 0;
-
-	int16_t buf;
-	int16_t buf2 = 1500;
-	struct adc_sequence sequence = {
-		.buffer = &buf,
-		.buffer_size = sizeof(buf),
-		// Optional
-		//.calibrate = true,
-	};
-	
-	struct adc_sequence sequence2 = {
-		.buffer = &buf2,
-		.buffer_size = sizeof(buf2),
-		// Optional
-		//.calibrate = true,
-	};
-
+bool adc_init(){
 	if (!adc_is_ready_dt(&adc_channel1) || !adc_is_ready_dt(&adc_channel2)) {
 		LOG_ERR("ADC controller devivce %s not ready");
-		return 0;
+		return false;
 	}
 
 	if (adc_channel_setup_dt(&adc_channel1) < 0 || adc_channel_setup_dt(&adc_channel2) < 0) {
 		LOG_ERR("Could not setup channel");
-		return 0;
+		return false;
 	}
 
 	if (adc_sequence_init_dt(&adc_channel1, &sequence) < 0 || adc_sequence_init_dt(&adc_channel2, &sequence2) < 0) {
 		LOG_ERR("Could not initalize sequnce");
-		return 0;
+		return false;
 	}
 
+	return true;
+}
 
 
-	k_timer_init(&my_timer, timer_expiry_function, timer_stop_function);
-	k_timer_init(&led_timer, led_timer_expiry_function, led_timer_stop_function);
+int main(void)
+{
+	
+	int ret;//return value from functions, used to check error codes
+
+	has_debounce = true;//reset debounce so we can start with a button press
+
+	led_timer_running = false;
+
+
+
+	adc_init();
+
+
+
+	//function for when deboucne timer stops, no code needed yet
+	k_timer_init(&debounce_timer, debounce_timer_expiry_function, debounce_stop_timer_function);
+	k_timer_init(&led_blink_timer, led_timer_expiry_function, led_timer_stop_function);
 
 
 	if (!device_is_ready(button.port)) {
@@ -162,27 +186,27 @@ int main(void)
 	uint16_t i;
 	gpio_add_callback(button.port, &button_cb_data);
 	while (1) {
-		err = adc_read(adc_channel1.dev, &sequence);
-		if(err != 0) LOG_ERR("ADC 1 couln't read err:%d", err);
-		val_mv = (int)buf;
-		err = adc_raw_to_millivolts_dt(&adc_channel1, &val_mv);
-		if(led_timer_running == false && val_mv <= 500 && val_mv2 >= 1000){
+		ret = adc_read(adc_channel1.dev, &sequence);
+		if(ret != 0) LOG_ERR("ADC 1 couln't read ret:%d", ret);
+		x_mv = (int)x_adc_buf;
+		ret = adc_raw_to_millivolts_dt(&adc_channel1, &x_mv);
+		if(led_timer_running == false && x_mv <= 500 && y_mv >= 1000){
 			LOG_INF("Timer started by adc 1");
-			k_timer_start(&led_timer, K_MSEC(200), K_NO_WAIT);
+			k_timer_start(&led_blink_timer, K_MSEC(200), K_NO_WAIT);
 			led_timer_running = true;
 		}
 		
-		err = adc_read(adc_channel2.dev, &sequence2);
-		if(err != 0) LOG_ERR("ADC 2 couln't read err:%d", err);
-		val_mv2 = (int)buf2;
-		err = adc_raw_to_millivolts_dt(&adc_channel2, &val_mv2);
-		if(led_timer_running == false && val_mv2 <= 500 && val_mv >= 1000){
+		ret = adc_read(adc_channel2.dev, &sequence2);
+		if(ret != 0) LOG_ERR("ADC 2 couln't read ret:%d", ret);
+		y_mv = (int)y_adc_buf;
+		ret = adc_raw_to_millivolts_dt(&adc_channel2, &y_mv);
+		if(led_timer_running == false && y_mv <= 500 && x_mv >= 1000){
 			LOG_INF("Timer started BY ADC 2");
-			k_timer_start(&led_timer, K_MSEC(500), K_NO_WAIT);
+			k_timer_start(&led_blink_timer, K_MSEC(500), K_NO_WAIT);
 			led_timer_running = true;
 		}
 		
-		if(i++ % 10 == 0) LOG_INF("val1:%d\tval2:%d\ttimer running%d",val_mv,val_mv2, led_timer_running);
+		if(i++ % 10 == 0) LOG_INF("val1:%d\t  val2:%d%stimer running%d",x_mv,y_mv, "\t", led_timer_running);
 		k_sleep(K_MSEC(50));
 	}
 }
